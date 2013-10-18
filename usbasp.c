@@ -135,9 +135,9 @@ static int usbasp_transmit(PROGRAMMER * pgm, unsigned char receive,
 			   unsigned char functionid, const unsigned char *send,
 			   unsigned char *buffer, int buffersize);
 #ifdef USE_LIBUSB_1_0
-static int usbOpenDevice(libusb_device_handle **device, int vendor, char *vendorName, int product, char *productName);
+static int usbOpenDevice(libusb_device_handle **device, int vendor, char *vendorName, int product, char *productName, char *serialNumber);
 #else
-static int usbOpenDevice(usb_dev_handle **device, int vendor, char *vendorName, int product, char *productName);
+static int usbOpenDevice(usb_dev_handle **device, int vendor, char *vendorName, int product, char *productName, char *serialNumber);
 #endif
 // interface - prog.
 static int usbasp_open(PROGRAMMER * pgm, char * port);
@@ -289,7 +289,7 @@ static int usbasp_transmit(PROGRAMMER * pgm,
  */
 #ifdef USE_LIBUSB_1_0
 static int usbOpenDevice(libusb_device_handle **device, int vendor,
-			 char *vendorName, int product, char *productName)
+			 char *vendorName, int product, char *productName, char *serialNumber)
 {
     libusb_device_handle *handle = NULL;
     int                  errorCode = USB_ERROR_NOTFOUND;
@@ -321,6 +321,23 @@ static int usbOpenDevice(libusb_device_handle **device, int vendor,
                     continue;
             }
             errorCode = 0;
+	    /* first check for a serial match, if serial is given */
+            r = libusb_get_string_descriptor_ascii(handle, descriptor.iSerialNumber & 0xff, string, sizeof(string));
+            if (r < 0) {
+                if ((serialNumber != NULL) && (serialNumber[0] != 0)) {
+                    errorCode = USB_ERROR_IO;
+                    fprintf(stderr,
+			    "%s: Warning: cannot query serial number for device: %s\n",
+			    progname, strerror(libusb_to_errno(r)));
+		}
+            } else {
+		if (verbose > 1)
+		    fprintf(stderr,
+			    "%s: seen device with serial number ->%s<-\n",
+			    progname, string);
+                if ((serialNumber != NULL) && (serialNumber[0] != 0) && (strcmp(string, serialNumber) != 0))
+                    errorCode = USB_ERROR_NOTFOUND;
+            }  
             /* now check whether the names match: */
             /* if vendorName not given ignore it (any vendor matches) */
 	    r = libusb_get_string_descriptor_ascii(handle, descriptor.iManufacturer & 0xff, string, sizeof(string));
@@ -371,7 +388,7 @@ static int usbOpenDevice(libusb_device_handle **device, int vendor,
 }
 #else
 static int usbOpenDevice(usb_dev_handle **device, int vendor,
-			 char *vendorName, int product, char *productName)
+			 char *vendorName, int product, char *productName, char *serialNumber)
 {
 struct usb_bus       *bus;
 struct usb_device    *dev;
@@ -401,6 +418,24 @@ static int           didUsbInit = 0;
                     continue;
                 }
                 errorCode = 0;
+                /* first check for a serial match, if serial is given */
+                len = usb_get_string_simple(handle, dev->descriptor.iSerialNumber,
+					    string, sizeof(string));
+                if(len < 0){
+                    if ((serialNumber != NULL) && (serialNumber[0] != 0)) { /* FIXME: Serial number should be allowed to be 0 or have a 0 at array entry 1, thus simply check for length being greater than zero */
+                    errorCode = USB_ERROR_IO;
+                    fprintf(stderr,
+			    "%s: Warning: cannot query USB serial for device: %s\n",
+			    progname, usb_strerror());
+		    }
+                } else {
+		    if (verbose > 1)
+		        fprintf(stderr,
+				"%s: seen device with serial ->%s<-\n",
+				progname, string);
+                    if((serialNumber != NULL) && (serialNumber[0] != 0) && (strcmp(string, serialNumber) != 0))
+                        errorCode = USB_ERROR_NOTFOUND;
+                }
                 /* now check whether the names match: */
                 /* if vendorName not given ignore it (any vendor matches) */
                 len = usb_get_string_simple(handle, dev->descriptor.iManufacturer,
@@ -462,10 +497,19 @@ static int usbasp_open(PROGRAMMER * pgm, char * port)
   if (verbose > 2)
     fprintf(stderr, "%s: usbasp_open(\"%s\")\n",
 	    progname, port);
+   /* save port in PROGRAMMER struct */
+  strcpy(pgm->port, port);
+
+  /* if serial number has been specified, remember pointer */
+  char *usbSerialNumber = NULL;
+  if (strncasecmp(pgm->port, "usb:", 4) == 0)
+      usbSerialNumber = &pgm->port[4];
+  if (strncasecmp(pgm->port, "nibobee:", 8) == 0)
+      usbSerialNumber = &pgm->port[8];
 
   /* usb_init will be done in usbOpenDevice */
   if (usbOpenDevice(&PDATA(pgm)->usbhandle, pgm->usbvid, pgm->usbvendor,
-		  pgm->usbpid, pgm->usbproduct) != 0) {
+		  pgm->usbpid, pgm->usbproduct, usbSerialNumber) != 0) {
     /* try alternatives */
     if(strcasecmp(ldata(lfirst(pgm->id)), "usbasp") == 0) {
     /* for id usbasp autodetect some variants */
@@ -475,7 +519,7 @@ static int usbasp_open(PROGRAMMER * pgm, char * port)
 	        "use \"-C nibobee\" instead.\n",
 	        progname);
         if (usbOpenDevice(&PDATA(pgm)->usbhandle, USBASP_NIBOBEE_VID, "www.nicai-systems.com",
-		        USBASP_NIBOBEE_PID, "NIBObee") != 0) {
+		        USBASP_NIBOBEE_PID, "NIBObee",usbSerialNumber) != 0) {
           fprintf(stderr,
 	          "%s: error: could not find USB device "
 	          "\"NIBObee\" with vid=0x%x pid=0x%x\n",
@@ -486,7 +530,7 @@ static int usbasp_open(PROGRAMMER * pgm, char * port)
       }
       /* check if device with old VID/PID is available */
       if (usbOpenDevice(&PDATA(pgm)->usbhandle, USBASP_OLD_VID, "www.fischl.de",
-		             USBASP_OLD_PID, "USBasp") == 0) {
+		             USBASP_OLD_PID, "USBasp", usbSerialNumber) == 0) {
         /* found USBasp with old IDs */
         fprintf(stderr,
 		"%s: Warning: Found USB device \"USBasp\" with "
@@ -499,8 +543,8 @@ static int usbasp_open(PROGRAMMER * pgm, char * port)
     }
 
     fprintf(stderr,
-            "%s: error: could not find USB device with vid=0x%x pid=0x%x",
-            progname, pgm->usbvid, pgm->usbpid);
+            "%s: error: could not find USB device with vid=0x%x pid=0x%x USBserial=%s",
+            progname, pgm->usbvid, pgm->usbpid, usbSerialNumber);
     if (pgm->usbvendor[0] != 0) {
        fprintf(stderr, " vendor='%s'", pgm->usbvendor);
     }
